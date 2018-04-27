@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -10,16 +9,28 @@ namespace Executor.UnitTest
     public class ExecutorTest
     {
         private TimeSpan _timeout = TimeSpan.FromSeconds(2);
-         
+        private Executor _cut;
+
+        [TestInitialize]
+        public void TestInitialize()
+        {
+            _cut = new Executor();
+        }
+
+        [TestCleanup]
+        public void TestCleanup()
+        {
+            _cut.Dispose();
+        }
+
         [TestMethod]
         public void Should_RunOneTask()
         {
             // Arrange
-            var cut = new Executor();
             var done = new AutoResetEvent(false);
 
             // Act
-            cut.AddForExecution(() => done.Set());
+            _cut.AddForExecution(() => done.Set());
             var res = done.WaitOne(_timeout);
 
             // Assert
@@ -30,14 +41,13 @@ namespace Executor.UnitTest
         public void Should_RunSeveralTasksInRightOrder()
         {
             // Arrange
-            var cut = new Executor();
             var done = new AutoResetEvent(false);
             var x = string.Empty;
 
             // Act
-            cut.AddForExecution(() => { x += 'A'; });
-            cut.AddForExecution(() => { x += 'B'; });
-            cut.AddForExecution(() => { x += 'C'; done.Set(); });
+            _cut.AddForExecution(() => { x += 'A'; });
+            _cut.AddForExecution(() => { x += 'B'; });
+            _cut.AddForExecution(() => { x += 'C'; done.Set(); });
             done.WaitOne(_timeout);
 
             // Assert
@@ -48,29 +58,68 @@ namespace Executor.UnitTest
         public void Should_AllowSeveralClientsToAddTasks()
         {
             // Arrange
-            var cut = new Executor();
             var x = 0;
             var done = new AutoResetEvent(false);
 
             // Act
-            Parallel.For(0, 100, (i) => { cut.AddForExecution(() => x++); });
-            cut.AddForExecution(() => { done.Set(); });
+            Parallel.For(0, 10000, (i) => { _cut.AddForExecution(() => x++); });
+            _cut.AddForExecution(() => { done.Set(); });
             done.WaitOne();
 
             // Assert
-            Assert.AreEqual(100, x);
+            Assert.AreEqual(10000, x);
+        }
+
+        [TestMethod]
+        public void Should_ReleaseWorkingThreads_When_CallerRespectsDispose()
+        {
+            // Arrange
+            var threadNumberBefore = System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
+
+            // Act
+            Parallel.For(0, 100, (i) =>
+            {
+                using (var cut = new Executor()) 
+                    cut.AddForExecution(() => { });
+            });
+
+            // Assert
+            var threadNumberAfter = System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
+            Assert.AreEqual(threadNumberBefore, threadNumberAfter);
+        }
+
+        //[TestMethod] This test is failing now
+        public void Should_ReleaseWorkingThreads_When_CallerDoesNotRespectsDispose()
+        {
+            // Arrange
+            var threadNumberBefore = System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
+
+            // Act
+            Parallel.For(0, 100, (i) =>
+            {
+                // Each executor spawns a working thread which is not stopped explicitly
+                var cut = new Executor();
+                cut.AddForExecution(() => { });
+            });
+
+            // Assert
+            var threadNumberAfter = System.Diagnostics.Process.GetCurrentProcess().Threads.Count;
+            Assert.AreEqual(threadNumberBefore, threadNumberAfter);
+        }
+
+        private void Execute()
+        {
         }
 
         [TestMethod]
         public void Should_RunNextTask_When_ExceptionIsThrown()
         {
             // Arrange
-            var cut = new Executor();
             var done = new AutoResetEvent(false);
 
             // Act
-            cut.AddForExecution(() => { throw new Exception(); });
-            cut.AddForExecution(() => { done.Set(); });
+            _cut.AddForExecution(() => { throw new Exception(); });
+            _cut.AddForExecution(() => { done.Set(); });
 
             var res = done.WaitOne(_timeout);
 
@@ -82,25 +131,22 @@ namespace Executor.UnitTest
         public void Should_AllowToDisposeTwice()
         {
             // Arrange
-            var cut = new Executor();
-
             // Act
-            cut.Dispose();
-            cut.Dispose();
+            _cut.Dispose();
+            _cut.Dispose();
 
             // Assert: no exception is expected
         }
 
         [TestMethod]
-        [ExpectedException(typeof(InvalidOperationException))]
+        [ExpectedException(typeof(ObjectDisposedException))]
         public void Should_NotAllowToAddTaskAfterDisposal()
         {
             // Arrange
-            var cut = new Executor();
-            cut.Dispose();
+            _cut.Dispose();
 
             // Act
-            cut.AddForExecution(() => { });
+            _cut.AddForExecution(() => { });
 
             // Assert: exception is expected
         }
@@ -110,9 +156,9 @@ namespace Executor.UnitTest
         public void Should_NotAllowToAddNullTask()
         {
             // Arrange
-            var cut = new Executor();
+
             // Act
-            cut.AddForExecution(null);
+            _cut.AddForExecution(null);
 
             // Assert: exception is expected
         }

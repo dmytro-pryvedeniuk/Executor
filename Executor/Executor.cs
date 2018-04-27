@@ -1,30 +1,44 @@
 ﻿using System;
-using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Threading;
-using System.Threading.Tasks;
 
 namespace Executor
 {
+    /// <summary>
+    /// Represents error which occur when the object of class implementing <see cref="IDisposable"/>
+    /// is not disposed properly.
+    /// </summary>
+    public class ObjectNotDisposedException : Exception
+    {
+        public ObjectNotDisposedException(string message): base(message)
+        {
+        }
+    }
+
     /// <summary>
     /// Executes the tasks at any time by any number of clients.
     /// </summary>
     public sealed class Executor : IDisposable
     {
-        private Queue<Action> _queue;
-        private Task _task;
+        private ConcurrentQueue<Action> _queue;
+        private Thread _thread;
         private CancellationTokenSource _cancellation;
         private AutoResetEvent _go;
-        private object _lock = new object();
+        private bool _disposed;
 
         /// <summary>
         /// Constructor.
         /// </summary>
         public Executor()
         {
-            _queue = new Queue<Action>();
+            _queue = new ConcurrentQueue<Action>();
             _go = new AutoResetEvent(false);
-            _task = Task.Run((Action)Process);
             _cancellation = new CancellationTokenSource();
+            _thread = new Thread(Process)
+            {
+                IsBackground = true
+            };
+            _thread.Start();
         }
 
         /// <summary>
@@ -34,48 +48,49 @@ namespace Executor
         /// </summary>
         public void AddForExecution(Action task)
         {
+            CheckDisposed();
+
             if (task == null)
                 throw new ArgumentNullException(nameof(task));
-            if (_cancellation.IsCancellationRequested)
-                throw new InvalidOperationException("Unable to add tasks after disposal.");
-
-            lock (_lock)
-                _queue.Enqueue(task);
+           
+            _queue.Enqueue(task);
             _go.Set();
         }
 
         /// <summary>
         /// Disposes the allocated resources.
         /// </summary>
-        /// <param name="disposing"><c>True</c> if called via <see cref="Dispose()"/> method.</param>
-        public void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                GC.SuppressFinalize(this);
-            }
-            if (!_cancellation.IsCancellationRequested)
-            {
-                _cancellation.Cancel();
-                _go.Set();
-                _task.Wait(); // Allow the worker thread to handle cancellation
-            }
-        }
-
-        /// <summary>
-        /// Disposes allocated resources.
-        /// </summary>
         public void Dispose()
         {
-            Dispose(true);
+            if (_disposed) return;
+            _cancellation.Cancel();
+            _go.Set();
+            _thread.Join(); // wait for the thread completion to dispose dependencies
+
+            _cancellation.Dispose();
+            _go.Dispose();
+            _disposed = true;
+#if DEBUG
+            // https://stackoverflow.com/a/32882853
+            GC.SuppressFinalize(this);
         }
 
         /// <summary>
-        /// Finalizer.
+        /// Destructor.
         /// </summary>
         ~Executor()
         {
-            Dispose(false);
+            throw new ObjectNotDisposedException("You have to dispose the object correctly.");
+#endif
+        }
+
+        /// <summary>
+        /// Throws <see cref="ObjectDisposedException"/> when the object is disposed.
+        /// </summary>
+        private void CheckDisposed()
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(null);
         }
 
         /// <summary>
@@ -83,31 +98,35 @@ namespace Executor
         /// </summary>
         private void Process()
         {
-            while (true)
+            Console.WriteLine($"{Thread.CurrentThread.ManagedThreadId} started.");
+            try
             {
-                if (_cancellation.IsCancellationRequested) return;
-                Action task = null;
-                lock (_lock)
+                while (true)
                 {
-                    if (_queue.Count > 0)
-                        task = _queue.Dequeue();
-                }
+                    if (_cancellation.IsCancellationRequested) return;
 
-                if (task != null)
-                {
-                    try
+                    if (_queue.TryDequeue(out Action task))
                     {
-                        task();
+                        try
+                        {
+                            task();
+                        }
+                        catch (Exception)
+                        {
+                            // It's expected the the client code handles the exceptions.
+                            // Here we swallow the exception as a fallback strategy 
+                            // to allow the next tasks to be executed.
+                        }
                     }
-                    catch (Exception)
+                    else
                     {
-                        // It's expected the the client code handles the exceptions.
-                        // Here we swallow the exception as a fallback strategy 
-                        // to allow the next tasks to be executed.
+                        _go.WaitOne();
                     }
                 }
-                else
-                    _go.WaitOne();
+            }
+            finally
+            {
+                Console.WriteLine($"{Thread.CurrentThread.ManagedThreadId} finished.");
             }
         }
     }
