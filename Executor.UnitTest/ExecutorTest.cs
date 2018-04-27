@@ -107,10 +107,6 @@ namespace Executor.UnitTest
             Assert.AreEqual(threadNumberBefore, threadNumberAfter);
         }
 
-        private void Execute()
-        {
-        }
-
         [TestMethod]
         public void Should_RunNextTask_When_ExceptionIsThrown()
         {
